@@ -94,9 +94,9 @@ def main():
     ap.add_argument('--sql-calib', default='cands_calib.sql')
     ap.add_argument('--sql-user', default='cands_user.sql')
     ap.add_argument('--bak-user-path',
-                    default='/var/opt/mssql/data/FazalDinPP19V3DBDump.BAK')
+                    default='/bakshare/FazalDinPP19V3DBDump.BAK')
     ap.add_argument('--bak-calib-path',
-                    default='/var/opt/mssql/data/calib1.bak')
+                    default='/bakshare/calib1.bak')
     a = ap.parse_args()
 
     core = expand([''])

@@ -61,6 +61,48 @@ def diff_runs(a, b, minlen=8, gap=3):
             for (o, e) in runs if e - o + 1 >= minlen]
 
 
+def cmd_header(a):
+    import re
+    data = open(a.file, 'rb').read(a.bytes)
+    print("===== MTF block walk =====")
+    off = 0
+    while off + 8 <= len(data) and off < 400000:
+        size = int.from_bytes(data[off:off + 4], 'little')
+        btype = data[off + 4:off + 8].decode('latin1', errors='replace')
+        if size < 8 or size > 50_000_000:
+            print(f"@0x{off:x}: suspicious block size {size}, stopping walk")
+            break
+        print(f"@0x{off:x}: type={btype!r} size={size}")
+        off += size
+    print("===== signatures in header =====")
+    for sig in (b'TAPE', b'MHDR', b'VOLB', b'SQLHDR', b'DBLB', b'DATA',
+                b'EOFM', b'SQLSIDT', b'SQLSGT', b'PWD'):
+        found = []
+        start = 0
+        while True:
+            i = data.find(sig, start)
+            if i == -1:
+                break
+            found.append(hex(i))
+            start = i + 1
+            if len(found) >= 8:
+                break
+        if found:
+            print(f"{sig.decode()}: {found}")
+    print("===== high-entropy 16-byte windows (first 4KB, stride 4, >=13 distinct) =====")
+    for off in range(0, min(len(data), 4096) - 16, 4):
+        w = data[off:off + 16]
+        if len(set(w)) >= 13:
+            print(f"@0x{off:x}: {w.hex()}")
+    print("===== utf16 printable strings (first 32KB) =====")
+    s = data.decode('utf-16-le', errors='ignore')
+    for m in re.finditer(r'[ -~]{6,}', s[:16384]):
+        print(f"u16@0x{m.start() * 2:x}: {m.group()!r}")
+    print("===== ascii printable strings (first 4KB) =====")
+    for m in re.finditer(rb'[ -~]{6,}', data[:4096]):
+        print(f"a@0x{m.start():x}: {m.group()!r}")
+
+
 def cmd_entropy(a):
     import collections
     size = os.path.getsize(a.file)
@@ -191,6 +233,11 @@ def main():
     p = sub.add_parser('entropy')
     p.add_argument('--file', required=True)
     p.set_defaults(func=cmd_entropy)
+
+    p = sub.add_parser('header')
+    p.add_argument('--file', required=True)
+    p.add_argument('--bytes', type=int, default=65536)
+    p.set_defaults(func=cmd_header)
 
     p = sub.add_parser('calibrate')
     p.add_argument('--user', required=True)

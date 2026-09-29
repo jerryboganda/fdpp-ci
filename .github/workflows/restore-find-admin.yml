@@ -10,6 +10,8 @@ jobs:
   restore-and-inspect:
     runs-on: ubuntu-latest
     timeout-minutes: 150
+    env:
+      BAK: /bakshare/FazalDinPP19V3DBDump.BAK
     steps:
       - uses: actions/checkout@v4
 
@@ -23,70 +25,78 @@ jobs:
           rm -f FazalDinPP19V3DBDump.zip
           df -h
 
-      - name: Start SQL Server 2022 container
+      - name: Start SQL Server 2022 and 2017 containers (backup bind-mounted read-only)
         run: |
           docker run -e "ACCEPT_EULA=Y" -e "MSSQL_SA_PASSWORD=TempSA_Passw0rd123" \
-            -e "MSSQL_PID=Developer" --name mssql -p 1433:1433 \
+            -e "MSSQL_PID=Developer" -e "MSSQL_MEMORY_LIMIT_MB=3072" --name sql2022 -p 1433:1433 \
+            -v "$GITHUB_WORKSPACE/FazalDinPP19V3DBDump.BAK:$BAK:ro" \
             -d mcr.microsoft.com/mssql/server:2022-latest
-          for i in $(seq 1 30); do
-            if docker exec mssql /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'TempSA_Passw0rd123' -C -Q "SELECT 1" -h -1 >/dev/null 2>&1; then
-              echo "SQL Server is up"; break
-            fi
-            sleep 5
+          docker run -e "ACCEPT_EULA=Y" -e "MSSQL_SA_PASSWORD=TempSA_Passw0rd123" -e "SA_PASSWORD=TempSA_Passw0rd123" \
+            -e "MSSQL_PID=Developer" -e "MSSQL_MEMORY_LIMIT_MB=3072" --name sql2017 -p 1434:1433 \
+            -v "$GITHUB_WORKSPACE/FazalDinPP19V3DBDump.BAK:$BAK:ro" \
+            -d mcr.microsoft.com/mssql/server:2017-latest
+          for name in sql2022 sql2017; do
+            TOOLS=/opt/mssql-tools18/bin/sqlcmd; FLAG=-C
+            [ "$name" = "sql2017" ] && TOOLS=/opt/mssql-tools/bin/sqlcmd && FLAG=""
+            for i in $(seq 1 40); do
+              if docker exec $name $TOOLS -S localhost -U sa -P 'TempSA_Passw0rd123' $FLAG -Q "SELECT 1" -h -1 >/dev/null 2>&1; then
+                echo "$name is up"; break
+              fi
+              sleep 5
+            done
           done
+          docker ps
 
-      - name: Dump user BAK header and entropy
+      - name: Probe which engine accepts restore passwords
+        run: |
+          S22="docker exec sql2022 /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P TempSA_Passw0rd123 -C"
+          S17="docker exec sql2017 /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P TempSA_Passw0rd123"
+          OUT22P=$($S22 -Q "RESTORE HEADERONLY FROM DISK = '$BAK' WITH PASSWORD = 'ProbeWrong123'" 2>&1 || true)
+          echo '===== 2022 WITH PASSWORD probe ====='; echo "$OUT22P" | head -6
+          OUT22M=$($S22 -Q "RESTORE HEADERONLY FROM DISK = '$BAK' WITH MEDIAPASSWORD = 'ProbeWrong123'" 2>&1 || true)
+          echo '===== 2022 WITH MEDIAPASSWORD probe ====='; echo "$OUT22M" | head -6
+          OUT17P=$($S17 -Q "RESTORE HEADERONLY FROM DISK = '$BAK' WITH PASSWORD = 'ProbeWrong123'" 2>&1 || true)
+          echo '===== 2017 WITH PASSWORD probe ====='; echo "$OUT17P" | head -6
+          OUT17M=$($S17 -Q "RESTORE HEADERONLY FROM DISK = '$BAK' WITH MEDIAPASSWORD = 'ProbeWrong123'" 2>&1 || true)
+          echo '===== 2017 WITH MEDIAPASSWORD probe ====='; echo "$OUT17M" | head -6
+          pick() {
+            if echo "$1" | grep -q '3279'; then
+              echo "$2" >> "$GITHUB_ENV"; echo "$3" >> "$GITHUB_ENV"; echo "$4" >> "$GITHUB_ENV"; echo "SQLSUPPORT=yes" >> "$GITHUB_ENV"
+              return 0
+            fi
+            return 1
+          }
+          pick "$OUT22P" "SQLCONT=sql2022" "SQLTOOLS=/opt/mssql-tools18/bin/sqlcmd" "SQLFLAG=-C" \
+            || pick "$OUT22M" "SQLCONT=sql2022" "SQLTOOLS=/opt/mssql-tools18/bin/sqlcmd" "SQLFLAG=-C" \
+            || pick "$OUT17P" "SQLCONT=sql2017" "SQLTOOLS=/opt/mssql-tools/bin/sqlcmd" "SQLFLAG=" \
+            || pick "$OUT17M" "SQLCONT=sql2017" "SQLTOOLS=/opt/mssql-tools/bin/sqlcmd" "SQLFLAG=" \
+            || echo "SQLSUPPORT=no" >> "$GITHUB_ENV"
+          echo "Chosen engine: $(grep SQLCONT "$GITHUB_ENV" || echo none)"
+
+      - name: Analyze backup header structure and entropy
         run: |
           cd "$GITHUB_WORKSPACE"
-          head -c 65536 FazalDinPP19V3DBDump.BAK > user_header.bin
-          echo '===== first 512 bytes of user BAK ====='
-          head -c 512 FazalDinPP19V3DBDump.BAK | xxd
+          echo '===== first 640 bytes of user BAK ====='
+          head -c 640 FazalDinPP19V3DBDump.BAK | xxd
+          python3 scripts/inspect_bak.py header --file user_header.bin --bytes 65536 || true
           echo '===== entropy samples ====='
           python3 scripts/inspect_bak.py entropy --file FazalDinPP19V3DBDump.BAK
 
-      - name: Create calibration backups with known passwords
-        run: |
-          cd "$GITHUB_WORKSPACE"
-          S="docker exec mssql /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P TempSA_Passw0rd123 -C"
-          $S -Q "IF DB_ID('calib') IS NULL CREATE DATABASE calib"
-          sleep 3
-          $S -Q "BACKUP DATABASE [calib] TO DISK = '/var/opt/mssql/data/calib1.bak' WITH FORMAT, INIT, PASSWORD = 'ZzTestPass01', NAME = 'calib-set-1'"
-          $S -Q "BACKUP DATABASE [calib] TO DISK = '/var/opt/mssql/data/calib2.bak' WITH FORMAT, INIT, PASSWORD = 'AaSecondPass02', NAME = 'calib-set-2'"
-          echo '--- MEDIAPASSWORD support check ---'
-          $S -Q "BACKUP DATABASE [calib] TO DISK = '/var/opt/mssql/data/calib3.bak' WITH FORMAT, INIT, MEDIAPASSWORD = 'MmMediaPass03', NAME = 'calib-set-3'" || echo 'NOTE: MEDIAPASSWORD not supported by this server version'
-          for f in calib1 calib2 calib3; do docker cp mssql:/var/opt/mssql/data/$f.bak ./$f.bak 2>/dev/null || true; done
-          for f in calib1 calib2 calib3; do [ -f $f.bak ] && head -c 65536 $f.bak > ${f}_header.bin; done
-          ls -la
-
-      - name: Calibrate password verifier from known-password backups
-        run: |
-          cd "$GITHUB_WORKSPACE"
-          python3 scripts/inspect_bak.py calibrate --user user_header.bin \
-            --calib1 calib1_header.bin --pw1 'ZzTestPass01' \
-            --calib2 calib2_header.bin --pw2 'AaSecondPass02' \
-            --out bak_configs.json
-
-      - name: Generate password candidates and SQL batches
+      - name: Generate password candidates and SQL batch
         run: |
           cd "$GITHUB_WORKSPACE"
           python3 scripts/gen_candidates.py \
             --out-all candidates_all.txt \
-            --sql-calib cands_calib.sql --sql-user cands_user.sql
+            --sql-user cands_user.sql \
+            --bak-user-path "$BAK"
 
-      - name: Self-test candidate loop on calibration backup
+      - name: Try all candidates via T-SQL loop
+        if: env.SQLSUPPORT == 'yes'
         run: |
           cd "$GITHUB_WORKSPACE"
-          S="docker exec mssql /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P TempSA_Passw0rd123 -C -W -s '|'"
-          docker cp cands_calib.sql mssql:/tmp/cands_calib.sql
-          echo '===== SELF-TEST (expect password=ZzTestPass01) ====='
-          $S -i /tmp/cands_calib.sql || true
-
-      - name: Try all candidates on user backup via T-SQL loop
-        run: |
-          cd "$GITHUB_WORKSPACE"
-          S="docker exec mssql /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P TempSA_Passw0rd123 -C -W -s '|'"
-          docker cp cands_user.sql mssql:/tmp/cands_user.sql
-          echo '===== CANDIDATE ATTEMPTS ON USER BAK ====='
+          S="docker exec $SQLCONT $SQLTOOLS -S localhost -U sa -P TempSA_Passw0rd123 $SQLFLAG -W -s '|'"
+          docker cp cands_user.sql $SQLCONT:/tmp/cands_user.sql
+          echo '===== CANDIDATE ATTEMPTS ====='
           HIT=$($S -i /tmp/cands_user.sql) || true
           echo "$HIT" | tail -5
           MODE=$(echo "$HIT" | awk -F'|' '/password/ {print $1; exit}')
@@ -95,16 +105,15 @@ jobs:
             echo "BAK_PWD_B64=$(printf '%s' "$PWDHIT" | base64 -w0)" >> "$GITHUB_ENV"
             echo "BAK_MODE=$MODE" >> "$GITHUB_ENV"
           else
-            echo "No candidate matched on user BAK."
+            echo "No candidate matched."
           fi
 
       - name: Crack with wordlist against header verifier
         if: env.BAK_PWD_B64 == ''
         run: |
           cd "$GITHUB_WORKSPACE"
-          if [ ! -f bak_configs.json ]; then echo 'no verifier config found; skipping crack'; exit 0; fi
+          if [ ! -f bak_configs.json ]; then echo 'no verifier config (SQL-2022 cannot create password backups); skipping offline crack'; exit 0; fi
           curl -sSL -o rockyou.txt https://github.com/brannondorsey/naive-hashcat/releases/download/data/rockyou.txt || echo 'rockyou download failed'
-          wc -l rockyou.txt 2>/dev/null || true
           python3 scripts/inspect_bak.py crack --configs bak_configs.json \
             --wordlists candidates_all.txt rockyou.txt \
             --github-env "$GITHUB_ENV"
@@ -115,15 +124,15 @@ jobs:
           cd "$GITHUB_WORKSPACE"
           P="$(printf '%s' "${BAK_PWD_B64}" | base64 -d)"
           QP="$(printf '%s' "$P" | sed "s/'/''/g")"
-          S="docker exec mssql /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P TempSA_Passw0rd123 -C"
+          S="docker exec $SQLCONT $SQLTOOLS -S localhost -U sa -P TempSA_Passw0rd123 $SQLFLAG"
           if [ "$BAK_MODE" = "password" ]; then
             WCL="PASSWORD = N'$QP'"
           elif [ "$BAK_MODE" = "mediapassword" ]; then
             WCL="MEDIAPASSWORD = N'$QP'"
           else
-            if $S -h -1 -Q "RESTORE HEADERONLY FROM DISK = '/var/opt/mssql/data/FazalDinPP19V3DBDump.BAK' WITH PASSWORD = N'$QP'" >/dev/null 2>&1; then
+            if $S -h -1 -Q "RESTORE HEADERONLY FROM DISK = '$BAK' WITH PASSWORD = N'$QP'" >/dev/null 2>&1; then
               WCL="PASSWORD = N'$QP'"
-            elif $S -h -1 -Q "RESTORE HEADERONLY FROM DISK = '/var/opt/mssql/data/FazalDinPP19V3DBDump.BAK' WITH MEDIAPASSWORD = N'$QP'" >/dev/null 2>&1; then
+            elif $S -h -1 -Q "RESTORE HEADERONLY FROM DISK = '$BAK' WITH MEDIAPASSWORD = N'$QP'" >/dev/null 2>&1; then
               WCL="MEDIAPASSWORD = N'$QP'"
             else
               WCL="PASSWORD = N'$QP', MEDIAPASSWORD = N'$QP'"
@@ -131,18 +140,18 @@ jobs:
           fi
           echo "Working WITH clause mode: $BAK_MODE (password hidden)"
           echo '===== HEADERONLY (with password) ====='
-          $S -W -Q "RESTORE HEADERONLY FROM DISK = '/var/opt/mssql/data/FazalDinPP19V3DBDump.BAK' WITH $WCL" || true
+          $S -W -Q "RESTORE HEADERONLY FROM DISK = '$BAK' WITH $WCL" || true
           echo '===== FILELISTONLY ====='
-          $S -W -s '|' -h -1 -Q "RESTORE FILELISTONLY FROM DISK = '/var/opt/mssql/data/FazalDinPP19V3DBDump.BAK' WITH $WCL" | tee /tmp/filelist.txt
+          $S -W -s '|' -h -1 -Q "RESTORE FILELISTONLY FROM DISK = '$BAK' WITH $WCL" | tee /tmp/filelist.txt
           MOVES=$(awk -F'|' 'NF>3 && $3=="D" {print "MOVE N'\''"$1"'\'' TO '\''/var/opt/mssql/data/"$1".mdf'\'',"} NF>3 && $3=="L" {print "MOVE N'\''"$1"'\'' TO '\''/var/opt/mssql/data/"$1".ldf'\''"}' /tmp/filelist.txt | paste -sd' ' -)
           MOVES=${MOVES%,}
           echo "MOVE clauses: $MOVES"
-          $S -W -Q "RESTORE DATABASE [FDPP] FROM DISK = '/var/opt/mssql/data/FazalDinPP19V3DBDump.BAK' WITH $WCL, $MOVES, RECOVERY, REPLACE, STATS = 10"
+          $S -W -Q "RESTORE DATABASE [FDPP] FROM DISK = '$BAK' WITH $WCL, $MOVES, RECOVERY, REPLACE, STATS = 10"
 
       - name: Find user/login tables and password columns
         if: env.BAK_PWD_B64 != ''
         run: |
-          S="docker exec mssql /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P TempSA_Passw0rd123 -C -d FDPP -W -s '|'"
+          S="docker exec $SQLCONT $SQLTOOLS -S localhost -U sa -P TempSA_Passw0rd123 $SQLFLAG -d FDPP -W -s '|'"
           echo '===== TABLES matching user/login/admin/employee/account ====='
           $S -Q "SET NOCOUNT ON; SELECT s.name + '.' + t.name AS tbl, p.rows AS row_count FROM sys.tables t JOIN sys.schemas s ON s.schema_id=t.schema_id JOIN sys.partitions p ON p.object_id=t.object_id AND p.index_id IN (0,1) WHERE LOWER(t.name) LIKE '%user%' OR LOWER(t.name) LIKE '%login%' OR LOWER(t.name) LIKE '%admin%' OR LOWER(t.name) LIKE '%employee%' OR LOWER(t.name) LIKE '%account%' OR LOWER(t.name) LIKE '%operator%' OR LOWER(t.name) LIKE '%staff%'"
           echo '===== COLUMNS with pass/pwd/user in name ====='
@@ -151,7 +160,7 @@ jobs:
       - name: Dump candidate login tables
         if: env.BAK_PWD_B64 != ''
         run: |
-          S="docker exec mssql /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P TempSA_Passw0rd123 -C -d FDPP -W -s '|'"
+          S="docker exec $SQLCONT $SQLTOOLS -S localhost -U sa -P TempSA_Passw0rd123 $SQLFLAG -d FDPP -W -s '|'"
           TABLES=$($S -h -1 -Q "SET NOCOUNT ON; SELECT DISTINCT OBJECT_SCHEMA_NAME(c.object_id) + '.' + OBJECT_NAME(c.object_id) FROM sys.columns c WHERE LOWER(c.name) LIKE '%pass%' OR LOWER(c.name) LIKE '%pwd%' OR LOWER(c.name) LIKE '%user%' OR LOWER(c.name) LIKE '%login%' OR LOWER(c.name) LIKE '%pin%'" | grep -v '^$' | grep -v 'rows affected')
           echo "Candidate tables: $TABLES"
           for T in $TABLES; do
@@ -162,7 +171,7 @@ jobs:
       - name: Search for admin rows anywhere
         if: env.BAK_PWD_B64 != ''
         run: |
-          S="docker exec mssql /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P TempSA_Passw0rd123 -C -d FDPP -W -s '|'"
+          S="docker exec $SQLCONT $SQLTOOLS -S localhost -U sa -P TempSA_Passw0rd123 $SQLFLAG -d FDPP -W -s '|'"
           PAIRS=$($S -h -1 -Q "SET NOCOUNT ON; SELECT DISTINCT OBJECT_SCHEMA_NAME(c1.object_id) + '|' + c1.name + '|' + c2.name FROM sys.columns c1 JOIN sys.columns c2 ON c1.object_id = c2.object_id WHERE (LOWER(c1.name) LIKE '%user%name%' OR LOWER(c1.name)='username' OR LOWER(c1.name) LIKE '%login%') AND (LOWER(c2.name) LIKE '%pass%' OR LOWER(c2.name) LIKE '%pwd%')" | grep -v 'rows affected' | grep -v '^$')
           echo "Username/Password column pairs: $PAIRS"
           IFS=$'\n'
