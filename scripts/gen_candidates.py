@@ -57,10 +57,14 @@ def expand(prefixes):
 
 
 def write_sql(path, bakpath, words):
-    vals = "),(".join("N'" + w.replace("'", "''") + "'" for w in words)
+    inserts = []
+    for i in range(0, len(words), 900):
+        chunk = words[i:i + 900]
+        vals = "),(".join("N'" + w.replace("'", "''") + "'" for w in chunk)
+        inserts.append(f"INSERT INTO #cands VALUES ({vals});")
     sql = f"""SET NOCOUNT ON;
 CREATE TABLE #cands (pw nvarchar(128));
-INSERT INTO #cands VALUES ({vals});
+{chr(10).join(inserts)}
 CREATE TABLE #ok (mode nvarchar(20), pw nvarchar(128));
 DECLARE @pw nvarchar(128), @sql nvarchar(400);
 DECLARE cur CURSOR LOCAL FAST_FORWARD FOR SELECT pw FROM #cands;

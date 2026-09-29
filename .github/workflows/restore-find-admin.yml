@@ -108,6 +108,17 @@ jobs:
             echo "No candidate matched."
           fi
 
+      - name: Offline attack on header hash blobs
+        if: env.BAK_PWD_B64 == ''
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          head -c 65536 FazalDinPP19V3DBDump.BAK > user_header.bin
+          curl -sSL -o rockyou.txt https://github.com/brannondorsey/naive-hashcat/releases/download/data/rockyou.txt || echo 'rockyou download failed'
+          wc -l rockyou.txt 2>/dev/null || true
+          python3 scripts/inspect_bak.py scan --file user_header.bin \
+            --wordlists candidates_all.txt rockyou.txt \
+            --github-env "$GITHUB_ENV"
+
       - name: Crack with wordlist against header verifier
         if: env.BAK_PWD_B64 == ''
         run: |
@@ -190,4 +201,4 @@ jobs:
         if: env.BAK_PWD_B64 == ''
         run: |
           cd "$GITHUB_WORKSPACE"
-          python3 scripts/inspect_bak.py stringscan --file FazalDinPP19V3DBDump.BAK --max-hits 25 --ctx 256
+          python3 scripts/inspect_bak.py stringscan --file FazalDinPP19V3DBDump.BAK --max-hits 400 --ctx 160

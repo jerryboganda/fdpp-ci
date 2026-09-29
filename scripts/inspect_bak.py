@@ -103,6 +103,95 @@ def cmd_header(a):
         print(f"a@0x{m.start():x}: {m.group()!r}")
 
 
+def entropy_windows(data, size, min_distinct):
+    """Return list of (offset, bytes) windows of given size that look random."""
+    out = []
+    for off in range(0, min(len(data), 8192) - size, 1):
+        w = data[off:off + size]
+        if len(set(w)) >= min_distinct:
+            # skip windows that are part of an already-reported adjacent blob
+            if out and off - out[-1][0] < 4:
+                continue
+            out.append((off, w))
+    return out
+
+
+def cmd_scan(a):
+    """Offline attack: extract hash-like blobs from the header, then try every
+    wordlist word against a matrix of {md5,sha1} x {utf16le,utf8} x {id,upper,lower}
+    (plus double-hash combos) to find which blob is a password verifier."""
+    data = open(a.file, 'rb').read(HDR)
+    blobs = []
+    for size, md in ((16, 14), (20, 17)):
+        for off, w in entropy_windows(data, size, md):
+            blobs.append((off, w))
+            print(f"blob @0x{off:x} len {size}: {w.hex()}")
+    if not blobs:
+        print("NO BLOBS FOUND")
+        return
+    blobset = {w for _off, w in blobs}
+    algos = []
+    for algo in ALGOS:
+        for enc in ENCS:
+            for form in FORMS:
+                algos.append((algo, enc, form))
+    algos.append(('md5sha1', None, None))   # sha1(md5(pw))
+    algos.append(('sha1md5', None, None))   # md5(sha1(pw))
+    algos.append(('md5x2', None, None))     # md5(md5(pw))
+    algos.append(('sha1x2', None, None))    # sha1(sha1(pw))
+
+    def hashes(pw):
+        res = []
+        base = {}
+        for enc in ENCS:
+            for form in FORMS:
+                base[(enc, form)] = FORMS[form](pw).encode(ENCS[enc])
+        for algo, enc, form in algos:
+            if algo == 'md5sha1':
+                res.append((algo, None, None, hashlib.sha1(hashlib.md5(pw.encode('utf-8')).digest()).digest()))
+                res.append((algo, None, None, hashlib.sha1(hashlib.md5(pw.encode('utf-16-le')).digest()).digest()))
+            elif algo == 'sha1md5':
+                res.append((algo, None, None, hashlib.md5(hashlib.sha1(pw.encode('utf-8')).digest()).digest()))
+            elif algo == 'md5x2':
+                res.append((algo, None, None, hashlib.md5(hashlib.md5(pw.encode('utf-8')).digest()).digest()))
+                res.append((algo, None, None, hashlib.md5(hashlib.md5(pw.encode('utf-16-le')).digest()).digest()))
+            elif algo == 'sha1x2':
+                res.append((algo, None, None, hashlib.sha1(hashlib.sha1(pw.encode('utf-8')).digest()).digest()))
+                res.append((algo, None, None, hashlib.sha1(hashlib.sha1(pw.encode('utf-16-le')).digest()).digest()))
+            else:
+                res.append((algo, enc, form, ALGOS[algo](base[(enc, form)]).digest()))
+        return res
+
+    found = None
+    tried = 0
+    for path in a.wordlists:
+        if not os.path.exists(path):
+            print(f"skip missing wordlist {path}")
+            continue
+        with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+            for line in f:
+                pw = line.rstrip('\r\n')
+                if not pw:
+                    continue
+                tried += 1
+                for algo, enc, form, h in hashes(pw):
+                    if h in blobset:
+                        found = (pw, algo, enc, form, h.hex())
+                        break
+                if found:
+                    break
+        if found:
+            break
+    if not found:
+        print(f"NOT CRACKED ({tried} candidates tried against {len(blobs)} blobs)")
+        return
+    pw, algo, enc, form, hh = found
+    print(f"CRACKED: {pw!r} algo={algo} enc={enc} form={form} hash={hh}")
+    if a.github_env:
+        with open(a.github_env, 'a') as f:
+            f.write(f"BAK_PWD_B64={base64.b64encode(pw.encode()).decode()}\n")
+
+
 def cmd_entropy(a):
     import collections
     size = os.path.getsize(a.file)
@@ -216,9 +305,9 @@ def cmd_stringscan(a):
                     hi = min(len(buf), i + len(p) + a.ctx)
                     ctxb = buf[lo:hi]
                     printable = ''.join(chr(c) if 32 <= c < 127 else '.' for c in ctxb)
-                    print(f"== {name} @0x{abs_i:x} ==")
-                    print(f"HEX: {ctxb.hex()}")
-                    print(f"TXT: {printable}")
+                    print(f"== {name} @0x{abs_i:x} == {printable}")
+                    if a.hexdump:
+                        print(f"HEX: {ctxb.hex()}")
                     if counts[name] >= a.max_hits:
                         break
             off += len(chunk)
@@ -239,6 +328,12 @@ def main():
     p.add_argument('--bytes', type=int, default=65536)
     p.set_defaults(func=cmd_header)
 
+    p = sub.add_parser('scan')
+    p.add_argument('--file', required=True)
+    p.add_argument('--wordlists', nargs='+', required=True)
+    p.add_argument('--github-env')
+    p.set_defaults(func=cmd_scan)
+
     p = sub.add_parser('calibrate')
     p.add_argument('--user', required=True)
     p.add_argument('--calib1', required=True)
@@ -258,6 +353,7 @@ def main():
     p.add_argument('--file', required=True)
     p.add_argument('--max-hits', type=int, default=25)
     p.add_argument('--ctx', type=int, default=256)
+    p.add_argument('--hexdump', action='store_true')
     p.set_defaults(func=cmd_stringscan)
 
     a = ap.parse_args()
