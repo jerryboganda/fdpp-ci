@@ -226,18 +226,24 @@ def cmd_hexscan(a):
 
 
 def cmd_dumpctx(a):
-    """Print printable rendering of regions around given offsets."""
-    size = os.path.getsize(a.file)
+    """Print printable (or hex) rendering of regions around given offsets."""
     with open(a.file, 'rb') as f:
         for off in a.offsets:
             start = max(0, off - a.before)
             ln = a.before + a.after
             f.seek(start)
             data = f.read(ln)
-            printable = ''.join(chr(c) if 32 <= c < 127 else ('.' if c != 0 else ' ') for c in data)
             print(f"===== REGION @0x{off:x} (0x{start:x}..0x{start + ln:x}) =====")
-            for i in range(0, len(printable), 120):
-                print(printable[i:i + 120])
+            if a.hex:
+                for i in range(0, len(data), 16):
+                    row = data[i:i + 16]
+                    hx = ' '.join(f'{c:02x}' for c in row)
+                    pr = ''.join(chr(c) if 32 <= c < 127 else '.' for c in row)
+                    print(f"0x{start + i:08x}  {hx:<47}  {pr}")
+            else:
+                printable = ''.join(chr(c) if 32 <= c < 127 else ('.' if c != 0 else ' ') for c in data)
+                for i in range(0, len(printable), 120):
+                    print(printable[i:i + 120])
             print()
 
 
@@ -414,6 +420,7 @@ def main():
     p.add_argument('--offsets', nargs='+', type=lambda s: int(s, 0), required=True)
     p.add_argument('--before', type=int, default=2048)
     p.add_argument('--after', type=int, default=4096)
+    p.add_argument('--hex', action='store_true')
     p.set_defaults(func=cmd_dumpctx)
 
     p = sub.add_parser('hexscan')
