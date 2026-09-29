@@ -201,4 +201,4 @@ jobs:
         if: env.BAK_PWD_B64 == ''
         run: |
           cd "$GITHUB_WORKSPACE"
-          python3 scripts/inspect_bak.py stringscan --file FazalDinPP19V3DBDump.BAK --max-hits 400 --ctx 160
+          python3 scripts/inspect_bak.py stringscan --file FazalDinPP19V3DBDump.BAK --max-hits 400 --ctx 200

@@ -273,6 +273,9 @@ def cmd_crack(a):
 
 def cmd_stringscan(a):
     pats = {
+        'spcadmin_u16': 'spcadmin'.encode('utf-16-le'),
+        'secrets_u16': 'secrets'.encode('utf-16-le'),
+        'secrets_ascii': b'secrets',
         'admin_u16': 'admin'.encode('utf-16-le'),
         'admin_ascii': b'admin',
         'password_u16': 'password'.encode('utf-16-le'),
