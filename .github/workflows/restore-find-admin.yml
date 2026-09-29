@@ -1,0 +1,89 @@
+name: Restore DB and find admin login
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  restore-and-inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - name: Download backup asset from private repo release
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          gh release download ci-backup --repo jerryboganda/fdpp --pattern '*.zip' --dir "$GITHUB_WORKSPACE" --clobber
+          cd "$GITHUB_WORKSPACE"
+          ls -la
+          unzip -o FazalDinPP19V3DBDump.zip
+          rm -f FazalDinPP19V3DBDump.zip
+          df -h
+
+      - name: Start SQL Server 2022 container
+        run: |
+          docker run -e "ACCEPT_EULA=Y" -e "MSSQL_SA_PASSWORD=TempSA_Passw0rd123" \
+            -e "MSSQL_PID=Developer" --name mssql -p 1433:1433 \
+            -d mcr.microsoft.com/mssql/server:2022-latest
+          for i in $(seq 1 30); do
+            if docker exec mssql /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'TempSA_Passw0rd123' -C -Q "SELECT 1" -h -1 >/dev/null 2>&1; then
+              echo "SQL Server is up"; break
+            fi
+            sleep 5
+          done
+          docker ps
+
+      - name: Inspect backup header and file list
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          docker cp FazalDinPP19V3DBDump.BAK mssql:/var/opt/mssql/data/
+          S="docker exec mssql /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P TempSA_Passw0rd123 -C"
+          echo '===== HEADERONLY ====='
+          $S -W -Q "RESTORE HEADERONLY FROM DISK = '/var/opt/mssql/data/FazalDinPP19V3DBDump.BAK'" || true
+          echo '===== FILELISTONLY ====='
+          $S -W -s '|' -h -1 -Q "RESTORE FILELISTONLY FROM DISK = '/var/opt/mssql/data/FazalDinPP19V3DBDump.BAK'" | tee /tmp/filelist.txt || true
+
+      - name: Restore database
+        run: |
+          S="docker exec mssql /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P TempSA_Passw0rd123 -C"
+          MOVES=$(awk -F'|' 'NF>3 && $3=="D" {print "MOVE N'\''"$1"'\'' TO '\''/var/opt/mssql/data/"$1".mdf'\'',"} NF>3 && $3=="L" {print "MOVE N'\''"$1"'\'' TO '\''/var/opt/mssql/data/"$1".ldf'\''"}' /tmp/filelist.txt | paste -sd' ' -)
+          MOVES=${MOVES%,}
+          echo "MOVE clauses: $MOVES"
+          $S -W -Q "RESTORE DATABASE [FDPP] FROM DISK = '/var/opt/mssql/data/FazalDinPP19V3DBDump.BAK' WITH $MOVES, RECOVERY, REPLACE, STATS = 10"
+
+      - name: Find user/login tables and password columns
+        run: |
+          S="docker exec mssql /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P TempSA_Passw0rd123 -C -d FDPP -W -s '|'"
+          echo '===== TABLES matching user/login/admin/employee/account ====='
+          $S -Q "SET NOCOUNT ON; SELECT s.name + '.' + t.name AS tbl, p.rows AS row_count FROM sys.tables t JOIN sys.schemas s ON s.schema_id=t.schema_id JOIN sys.partitions p ON p.object_id=t.object_id AND p.index_id IN (0,1) WHERE LOWER(t.name) LIKE '%user%' OR LOWER(t.name) LIKE '%login%' OR LOWER(t.name) LIKE '%admin%' OR LOWER(t.name) LIKE '%employee%' OR LOWER(t.name) LIKE '%account%' OR LOWER(t.name) LIKE '%operator%' OR LOWER(t.name) LIKE '%staff%'"
+          echo '===== COLUMNS with pass/pwd/user in name ====='
+          $S -Q "SET NOCOUNT ON; SELECT OBJECT_SCHEMA_NAME(c.object_id) + '.' + OBJECT_NAME(c.object_id) AS tbl, c.name AS col, TYPE_NAME(c.system_type_id) AS typ FROM sys.columns c WHERE LOWER(c.name) LIKE '%pass%' OR LOWER(c.name) LIKE '%pwd%' OR LOWER(c.name) LIKE '%user%' OR LOWER(c.name) LIKE '%login%' OR LOWER(c.name) LIKE '%pin%'"
+
+      - name: Dump candidate login tables
+        run: |
+          S="docker exec mssql /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P TempSA_Passw0rd123 -C -d FDPP -W -s '|'"
+          TABLES=$($S -h -1 -Q "SET NOCOUNT ON; SELECT DISTINCT OBJECT_SCHEMA_NAME(c.object_id) + '.' + OBJECT_NAME(c.object_id) FROM sys.columns c WHERE LOWER(c.name) LIKE '%pass%' OR LOWER(c.name) LIKE '%pwd%' OR LOWER(c.name) LIKE '%user%' OR LOWER(c.name) LIKE '%login%' OR LOWER(c.name) LIKE '%pin%'" | grep -v '^$' | grep -v 'rows affected')
+          echo "Candidate tables: $TABLES"
+          for T in $TABLES; do
+            echo "===== CONTENTS OF $T (top 100) ====="
+            $S -Q "SET NOCOUNT ON; SELECT TOP 100 * FROM [$T]"
+          done
+
+      - name: Search for admin rows anywhere
+        run: |
+          S="docker exec mssql /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P TempSA_Passw0rd123 -C -d FDPP -W -s '|'"
+          PAIRS=$($S -h -1 -Q "SET NOCOUNT ON; SELECT DISTINCT OBJECT_SCHEMA_NAME(c1.object_id) + '|' + c1.name + '|' + c2.name FROM sys.columns c1 JOIN sys.columns c2 ON c1.object_id = c2.object_id WHERE (LOWER(c1.name) LIKE '%user%name%' OR LOWER(c1.name)='username' OR LOWER(c1.name) LIKE '%login%') AND (LOWER(c2.name) LIKE '%pass%' OR LOWER(c2.name) LIKE '%pwd%')" | grep -v 'rows affected' | grep -v '^$')
+          echo "Username/Password column pairs: $PAIRS"
+          IFS=$'\n'
+          for P in $PAIRS; do
+            TBL=$(echo "$P" | cut -d'|' -f1)
+            UC=$(echo "$P" | cut -d'|' -f2)
+            PC=$(echo "$P" | cut -d'|' -f3)
+            echo "===== ADMIN ROW in $TBL (columns: $UC / $PC) ====="
+            $S -Q "SET NOCOUNT ON; SELECT TOP 5 * FROM [$TBL] WHERE LOWER([$UC]) = 'admin' OR LOWER([$UC]) LIKE 'admin%'"
+          done
+          unset IFS
+          echo '===== LIST OF ALL TABLES (for reference) ====='
+          $S -Q "SET NOCOUNT ON; SELECT s.name + '.' + t.name, p.rows FROM sys.tables t JOIN sys.schemas s ON s.schema_id=t.schema_id JOIN sys.partitions p ON p.object_id=t.object_id AND p.index_id IN (0,1) ORDER BY p.rows DESC" | head -80
