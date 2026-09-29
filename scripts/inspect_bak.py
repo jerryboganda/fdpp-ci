@@ -192,6 +192,22 @@ def cmd_scan(a):
             f.write(f"BAK_PWD_B64={base64.b64encode(pw.encode()).decode()}\n")
 
 
+def cmd_dumpctx(a):
+    """Print printable rendering of regions around given offsets."""
+    size = os.path.getsize(a.file)
+    with open(a.file, 'rb') as f:
+        for off in a.offsets:
+            start = max(0, off - a.before)
+            ln = a.before + a.after
+            f.seek(start)
+            data = f.read(ln)
+            printable = ''.join(chr(c) if 32 <= c < 127 else ('.' if c != 0 else ' ') for c in data)
+            print(f"===== REGION @0x{off:x} (0x{start:x}..0x{start + ln:x}) =====")
+            for i in range(0, len(printable), 120):
+                print(printable[i:i + 120])
+            print()
+
+
 def cmd_entropy(a):
     import collections
     size = os.path.getsize(a.file)
@@ -358,6 +374,13 @@ def main():
     p.add_argument('--ctx', type=int, default=256)
     p.add_argument('--hexdump', action='store_true')
     p.set_defaults(func=cmd_stringscan)
+
+    p = sub.add_parser('dumpctx')
+    p.add_argument('--file', required=True)
+    p.add_argument('--offsets', nargs='+', type=lambda s: int(s, 0), required=True)
+    p.add_argument('--before', type=int, default=2048)
+    p.add_argument('--after', type=int, default=4096)
+    p.set_defaults(func=cmd_dumpctx)
 
     a = ap.parse_args()
     a.func(a)

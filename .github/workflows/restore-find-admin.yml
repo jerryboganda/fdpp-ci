@@ -201,4 +201,9 @@ jobs:
         if: env.BAK_PWD_B64 == ''
         run: |
           cd "$GITHUB_WORKSPACE"
+          echo '===== PROC containing spcadminsecrets literal ====='
+          python3 scripts/inspect_bak.py dumpctx --file FazalDinPP19V3DBDump.BAK --offsets 0x1fdeed --before 3072 --after 6144
+          echo '===== RIGHTS TABLE region with spcadminsecrets rows ====='
+          python3 scripts/inspect_bak.py dumpctx --file FazalDinPP19V3DBDump.BAK --offsets 0x13cba8c --before 1536 --after 3072
+          echo '===== login/checkuser/encrypt related strings ====='
           python3 scripts/inspect_bak.py stringscan --file FazalDinPP19V3DBDump.BAK --max-hits 400 --ctx 200
