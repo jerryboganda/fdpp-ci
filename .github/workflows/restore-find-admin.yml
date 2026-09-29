@@ -207,3 +207,5 @@ jobs:
           python3 scripts/inspect_bak.py dumpctx --file FazalDinPP19V3DBDump.BAK --offsets 0x13cba8c --before 1536 --after 3072
           echo '===== login/checkuser/encrypt related strings ====='
           python3 scripts/inspect_bak.py stringscan --file FazalDinPP19V3DBDump.BAK --max-hits 400 --ctx 200
+          echo '===== 32-hex (MD5-like) password hashes ====='
+          python3 scripts/inspect_bak.py hexscan --file FazalDinPP19V3DBDump.BAK --max-hits 40

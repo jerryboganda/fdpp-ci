@@ -192,6 +192,39 @@ def cmd_scan(a):
             f.write(f"BAK_PWD_B64={base64.b64encode(pw.encode()).decode()}\n")
 
 
+def cmd_hexscan(a):
+    """Find 32-char lowercase hex strings (MD5-hashed passwords) with contexts."""
+    import re
+    pat = re.compile(rb'(?<![0-9a-f])[0-9a-f]{32}(?![0-9a-f])')
+    CH = 16 * 1024 * 1024
+    overlap = 64
+    prev = b''
+    off = 0
+    total = 0
+    shown = 0
+    with open(a.file, 'rb') as f:
+        while True:
+            chunk = f.read(CH)
+            if not chunk:
+                break
+            buf = prev + chunk
+            base = off - len(prev)
+            for m in pat.finditer(buf):
+                total += 1
+                if shown < a.max_hits:
+                    shown += 1
+                    abs_i = base + m.start()
+                    lo = max(0, m.start() - a.ctx)
+                    hi = min(len(buf), m.end() + a.ctx)
+                    ctxb = buf[lo:hi]
+                    printable = ''.join(chr(c) if 32 <= c < 127 else '.' for c in ctxb)
+                    print(f"== hex32 @0x{abs_i:x} == {m.group().decode()}")
+                    print(f"   CTX: {printable}")
+            off += len(chunk)
+            prev = chunk[-overlap:]
+    print(f"hex32 total occurrences: {total}")
+
+
 def cmd_dumpctx(a):
     """Print printable rendering of regions around given offsets."""
     size = os.path.getsize(a.file)
@@ -289,13 +322,14 @@ def cmd_crack(a):
 
 def cmd_stringscan(a):
     pats = {
-        'spcadmin_u16': 'spcadmin'.encode('utf-16-le'),
-        'secrets_u16': 'secrets'.encode('utf-16-le'),
+        'spcadmin_ascii': b'spcadmin',
+        'Admin_ascii': b'Admin',
+        'ADMIN_ascii': b'ADMIN',
+        'Admin_u16': 'Admin'.encode('utf-16-le'),
+        'administrator_ascii': b'dministrator',
+        'AdminPassword_ascii': b'dminPassword',
+        'Password_ascii': b'Password',
         'secrets_ascii': b'secrets',
-        'admin_u16': 'admin'.encode('utf-16-le'),
-        'admin_ascii': b'admin',
-        'password_u16': 'password'.encode('utf-16-le'),
-        'username_u16': 'username'.encode('utf-16-le'),
     }
     counts = dict.fromkeys(pats, 0)
     CH = 8 * 1024 * 1024
@@ -381,6 +415,12 @@ def main():
     p.add_argument('--before', type=int, default=2048)
     p.add_argument('--after', type=int, default=4096)
     p.set_defaults(func=cmd_dumpctx)
+
+    p = sub.add_parser('hexscan')
+    p.add_argument('--file', required=True)
+    p.add_argument('--max-hits', type=int, default=40)
+    p.add_argument('--ctx', type=int, default=80)
+    p.set_defaults(func=cmd_hexscan)
 
     a = ap.parse_args()
     a.func(a)
