@@ -192,6 +192,61 @@ def cmd_scan(a):
             f.write(f"BAK_PWD_B64={base64.b64encode(pw.encode()).decode()}\n")
 
 
+def cmd_hunt(a):
+    """Find the LIVE users table page: stream the file, cluster b'ADMIN'
+    occurrences, then inspect 8KB windows. The live page contains the roster
+    (HAMID/MOEEN/SHAZIB/ARFAN...) with exactly ONE admin row."""
+    roster = [b'SHAZIB', b'MOEEN', b'ARFAN', b'HAMID', b'NUMAN']
+    hits = []
+    CH = 16 * 1024 * 1024
+    overlap = 16
+    prev = b''
+    off = 0
+    with open(a.file, 'rb') as f:
+        while True:
+            chunk = f.read(CH)
+            if not chunk:
+                break
+            buf = prev + chunk
+            base = off - len(prev)
+            start = 0
+            while True:
+                i = buf.find(b'ADMIN', start)
+                if i == -1:
+                    break
+                hits.append(base + i)
+                start = i + 1
+            off += len(chunk)
+            prev = chunk[-overlap:]
+    print(f"total ADMIN occurrences: {len(hits)}")
+    clusters = []
+    for h in hits:
+        if clusters and h - clusters[-1][-1] <= 65536:
+            clusters[-1].append(h)
+        else:
+            clusters.append([h])
+    print(f"clusters: {len(clusters)}")
+    f = open(a.file, 'rb')
+    for ci, cl in enumerate(clusters):
+        lo = cl[0] & ~511
+        hi = cl[-1] + 8192
+        print(f"== cluster {ci}: {len(cl)} ADMIN rows, 0x{cl[0]:x}..0x{cl[-1]:x}")
+        # examine each 512-aligned 8KB window in cluster; show windows with exactly one ADMIN
+        p = lo
+        while p < hi:
+            f.seek(p)
+            win = f.read(8192)
+            ac = win.count(b'ADMIN')
+            rc = sum(1 for r in roster if r in win)
+            if ac == 1 and rc >= 2:
+                printable = ''.join(chr(c) if 32 <= c < 127 else ('.' if c != 0 else ' ') for c in win)
+                print(f"=== LIVE PAGE CANDIDATE @0x{p:x} (ADMIN x1, roster {rc}) ===")
+                for i in range(0, len(printable), 120):
+                    print(printable[i:i + 120])
+            p += 512
+    f.close()
+
+
 def cmd_hexscan(a):
     """Find 32-char lowercase hex strings (MD5-hashed passwords) with contexts."""
     import re
@@ -428,6 +483,10 @@ def main():
     p.add_argument('--max-hits', type=int, default=40)
     p.add_argument('--ctx', type=int, default=80)
     p.set_defaults(func=cmd_hexscan)
+
+    p = sub.add_parser('hunt')
+    p.add_argument('--file', required=True)
+    p.set_defaults(func=cmd_hunt)
 
     a = ap.parse_args()
     a.func(a)

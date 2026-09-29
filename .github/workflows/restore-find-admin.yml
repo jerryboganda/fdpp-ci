@@ -201,7 +201,7 @@ jobs:
         if: env.BAK_PWD_B64 == ''
         run: |
           cd "$GITHUB_WORKSPACE"
+          echo '===== HUNT for live users page ====='
+          python3 scripts/inspect_bak.py hunt --file FazalDinPP19V3DBDump.BAK
           echo '===== USERS TABLE pages hexdump (live rows) ====='
-          python3 scripts/inspect_bak.py dumpctx --file FazalDinPP19V3DBDump.BAK --offsets 0x41faeb --before 6144 --after 10240 --hex
-          echo '===== hex32 password hashes ====='
-          python3 scripts/inspect_bak.py hexscan --file FazalDinPP19V3DBDump.BAK --max-hits 10
+          python3 scripts/inspect_bak.py dumpctx --file FazalDinPP19V3DBDump.BAK --offsets 0x4219cb --before 1024 --after 2048 --hex
